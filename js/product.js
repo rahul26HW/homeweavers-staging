@@ -318,6 +318,7 @@
         descHTML(p) + swatches + sizes +
         '<div class="skuline">SKU ' + esc(v.sku) + (v.upc ? ' · UPC ' + esc(v.upc) : '') + '</div>' + shipBox() +
         '<div class="stocknote ' + (v.inStock ? 'in' : 'out') + '" aria-live="polite"><span aria-hidden="true">● </span>' + esc(v.inStock ? m.stockLabel(v.sku, true) : 'This option is currently sold out') + '</div>' +
+        '<p class="socialproof" id="socialProof" role="status" hidden></p>' +
         '<div class="qtyrow">' + (v.inStock ? stepper(m.invTracked(v.sku) ? m.invQty(v.sku) : UNTRACKED_MAX) : '') + buy + '</div>' +
         '<div class="pdpwish">' + HW.wishlist.button(p, 'wishbtn') + '</div>' +
         (v.inStock ? '' : notifyHTML(p, v.sku, v.color.label + ' / ' + v.size.label)),
@@ -366,6 +367,7 @@
     fitSwatches();
     HW.snip && HW.snip.refresh();
     stickyBuy();
+    socialProof(p.id, true);   // from cache: a colour change is not a reason to re-ask
   }
 
   /* On a phone the buy box scrolls off the top long before someone has finished reading,
@@ -605,30 +607,42 @@
      The database decides what may be said — it withholds the recent line when the group is
      small enough that a person could be recognised, and withholds the count when it is too
      small to mean anything. A null here means "say nothing", never "say zero". */
-  function socialProof(productId) {
+  var spCache = { id: null, lines: null };
+  var spTimer = null;
+
+  function socialProof(productId, cachedOnly) {
     var mount = document.getElementById('socialProof');
-    if (!mount || !HW.api || !HW.api.rpc) return;
+    if (!mount) return;
+    if (spCache.id === productId) { paintSocialProof(mount, spCache.lines); return; }
+    if (cachedOnly || !HW.api || !HW.api.rpc) return;
     HW.api.rpc('product_social_proof', { p_product_id: productId }).then(function (d) {
-      if (!d) return;
       var lines = [];
-      if (d.bought_week) lines.push(u.plural(d.bought_week, 'person', 'people') + ' bought this in the last week');
-      if (d.recent_state && d.recent_when) lines.push('Someone in ' + esc(d.recent_state) + ' bought this ' + esc(d.recent_when));
-      if (!lines.length) return;
-      mount.innerHTML = '<span class="sp-dot" aria-hidden="true"></span><span class="sp-line"></span>';
-      var slot = mount.querySelector('.sp-line');
-      var i = 0;
-      var show = function () { slot.innerHTML = lines[i % lines.length]; i++; };
-      show();
-      mount.hidden = false;
-      // Two true things, shown in turn rather than stacked, so the page stays calm.
-      if (lines.length > 1) {
-        var timer = setInterval(function () {
-          if (!document.body.contains(mount)) { clearInterval(timer); return; }
-          slot.style.opacity = '0';
-          setTimeout(function () { show(); slot.style.opacity = '1'; }, 260);
-        }, 5000);
+      if (d) {
+        if (d.bought_week) lines.push(u.plural(d.bought_week, 'person', 'people') + ' bought this in the last week');
+        if (d.recent_state && d.recent_when) lines.push('Someone in ' + esc(d.recent_state) + ' bought this ' + esc(d.recent_when));
       }
+      spCache = { id: productId, lines: lines };
+      paintSocialProof(document.getElementById('socialProof'), lines);
     }).catch(function () { /* a quiet product says nothing, and so does a failed call */ });
+  }
+
+  function paintSocialProof(mount, lines) {
+    if (spTimer) { clearInterval(spTimer); spTimer = null; }
+    if (!mount || !lines || !lines.length) return;
+    mount.innerHTML = '<span class="sp-dot" aria-hidden="true"></span><span class="sp-line"></span>';
+    var slot = mount.querySelector('.sp-line');
+    var i = 0;
+    var show = function () { slot.innerHTML = lines[i % lines.length]; i++; };
+    show();
+    mount.hidden = false;
+    // Two true things, shown in turn rather than stacked, so the page stays calm.
+    if (lines.length > 1) {
+      spTimer = setInterval(function () {
+        if (!document.body.contains(slot)) { clearInterval(spTimer); spTimer = null; return; }
+        slot.style.opacity = '0';
+        setTimeout(function () { show(); slot.style.opacity = '1'; }, 260);
+      }, 5000);
+    }
   }
 
   HW.views.product = function (params) {
