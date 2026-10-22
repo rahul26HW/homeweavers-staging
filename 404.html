@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-7PKhecMD+ulRWOoz7NXngzdbjLmisKI7SYCOHuXOcVc=' https://accounts.google.com/gsi/client; style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style; font-src 'self'; img-src 'self' data: blob: https:; media-src 'self' https:; connect-src 'self' https://xktzgdruyxyhmjixcixz.supabase.co https://accounts.google.com/gsi/ data: blob:; frame-src https://www.youtube-nocookie.com https://player.vimeo.com https://accounts.google.com/gsi/; object-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<title>Home Weavers</title>
+<meta name="robots" content="noindex">
+<link rel="icon" href="data:,">
+<script>
+  /* Single-page-app fallback for GitHub Pages.
+     A direct visit to /Website/product/x has no file, so Pages serves this page.
+     It rewrites the address to /Website/?/product/x and index.html turns it back.
+     On a *.github.io project site the first path part is the repo name and is kept.
+     On a custom domain or a user site (username.github.io) nothing is kept. */
+  (function () {
+    var l = window.location;
+    var segs = l.pathname.split('/').filter(Boolean);
+    var routes = ['category', 'product', 'page', 'admin', 'checkout', 'order', 'search', 'wishlist', 'account'];
+    var keep = (/github\.io$/i.test(l.hostname) && segs.length && routes.indexOf(segs[0]) < 0) ? 1 : 0;
+    l.replace(
+      l.protocol + '//' + l.hostname + (l.port ? ':' + l.port : '') +
+      l.pathname.split('/').slice(0, 1 + keep).join('/') + '/?/' +
+      l.pathname.slice(1).split('/').slice(keep).join('/').replace(/&/g, '~and~') +
+      (l.search ? '&' + l.search.slice(1).replace(/&/g, '~and~') : '') +
+      l.hash
+    );
+  })();
+</script>
+</head>
+<body></body>
+</html>

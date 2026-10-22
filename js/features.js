@@ -1,0 +1,442 @@
+/* Home Weavers — shopping extras: search, wishlist, recently viewed, image zoom, size guide, cookie consent, structured data. */
+(function (HW) {
+  'use strict';
+
+  var u = HW.u, esc = u.esc, m = HW.m;
+
+  /* ================================================================ *
+   * Structured data (JSON-LD)
+   * ================================================================ */
+  function absAsset(src) {
+    src = String(src || '');
+    if (!src || /^data:/.test(src)) return '';
+    if (/^https?:\/\//i.test(src)) return src;
+    return HW.absUrl('/' + src.replace(/^\/+/, ''));
+  }
+  /* "Company\n123 Main St, Suite 4\nCity, ST 12345\nUnited States" → schema.org PostalAddress (US format only). */
+  function postalAddress(text) {
+    var lines = String(text || '').split('\n').map(function (l) { return l.trim(); }).filter(Boolean);
+    var at = -1, m = null;
+    lines.forEach(function (l, i) { var x = l.match(/^(.+?),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/); if (x) { at = i; m = x; } });
+    if (!m) return undefined;
+    var street = lines.slice(0, at).filter(function (l) { return /\d/.test(l); }).join(', ');
+    return { '@type': 'PostalAddress', streetAddress: street || undefined, addressLocality: m[1], addressRegion: m[2], postalCode: m[3], addressCountry: 'US' };
+  }
+
+  HW.ld = {
+    breadcrumb: function (items) {
+      return { '@context': 'https://schema.org', '@type': 'BreadcrumbList', itemListElement: items.map(function (it, i) {
+        return { '@type': 'ListItem', position: i + 1, name: it[0], item: HW.absUrl(it[1]) };
+      }) };
+    },
+    product: function (p) {
+      var cat = m.categoryById(p.categoryId);
+      var images = [];
+      if (m.isCollection(p)) {
+        m.optColor(p).values.forEach(function (c) { var s = m.colorImage(p, c); if (s && images.indexOf(s) < 0) images.push(s); });
+      } else {
+        (p.images || []).filter(Boolean).forEach(function (s) { images.push(s); });
+      }
+      images = images.slice(0, 8).map(absAsset).filter(Boolean);
+      var url = HW.absUrl('/product/' + p.slug);
+      var out = m.productOut(p);
+      var data = {
+        '@context': 'https://schema.org', '@type': 'Product', name: p.name, url: url,
+        description: HW.seo.clip(HW.htmlToText(p.description), 5000) || undefined,
+        image: images.length ? images : undefined,
+        brand: { '@type': 'Brand', name: HW.DB.brand.name || 'Home Weavers' },
+        category: cat ? cat.name : undefined,
+        material: p.material || undefined
+      };
+      var availability = out ? 'https://schema.org/OutOfStock' : 'https://schema.org/InStock';
+      if (m.isCollection(p)) {
+        var r = m.priceRange(p), count = 0, firstSku = '';
+        m.eachVariant(p, function (v) { count++; if (!firstSku) firstSku = v.sku; });
+        data.sku = firstSku || undefined;
+        data.offers = { '@type': 'AggregateOffer', priceCurrency: 'USD', lowPrice: r.min.toFixed(2), highPrice: r.max.toFixed(2), offerCount: count, availability: availability, url: url };
+      } else {
+        data.sku = p.sku || undefined;
+        if (/^\d{12,14}$/.test(String(p.upc || ''))) data['gtin' + String(p.upc).length] = String(p.upc);
+        data.offers = { '@type': 'Offer', priceCurrency: 'USD', price: m.simplePrice(p).effective.toFixed(2), availability: availability, itemCondition: 'https://schema.org/NewCondition', url: url };
+      }
+      // Shipping and returns, as Google shows them in results.
+      var sh = HW.DB.shipping || {}, low = Number(data.offers.lowPrice || data.offers.price) || 0;
+      var rate = sh.enabled === false || (sh.freeThreshold && low >= sh.freeThreshold) ? 0 : Number(sh.flatRate) || 0;
+      var days = String(m.shippingDays()).match(/(\d+)\D+(\d+)/) || [0, 2, 4];
+      var qv = function (a, b) { return { '@type': 'QuantitativeValue', minValue: a, maxValue: b, unitCode: 'DAY' }; };
+      Object.assign(data.offers, {
+        priceValidUntil: (new Date().getFullYear() + 1) + '-12-31',
+        shippingDetails: {
+          '@type': 'OfferShippingDetails',
+          shippingDestination: { '@type': 'DefinedRegion', addressCountry: 'US' },
+          shippingRate: { '@type': 'MonetaryAmount', value: rate.toFixed(2), currency: 'USD' },
+          deliveryTime: { '@type': 'ShippingDeliveryTime', handlingTime: qv(0, 1), transitTime: qv(Number(days[1]), Number(days[2])) }
+        },
+        hasMerchantReturnPolicy: {
+          '@type': 'MerchantReturnPolicy', applicableCountry: 'US',
+          returnPolicyCategory: 'https://schema.org/MerchantReturnFiniteReturnWindow', merchantReturnDays: 30,
+          returnMethod: 'https://schema.org/ReturnByMail', returnFees: 'https://schema.org/ReturnFeesCustomerResponsibility'
+        }
+      });
+      return data;
+    },
+    site: function () {
+      var DB = HW.DB, soc = DB.social || {};
+      var sameAs = Object.keys(soc).map(function (k) { return soc[k]; }).filter(function (s) { return /^https?:\/\//.test(s); });
+      return [
+        { '@context': 'https://schema.org', '@type': 'WebSite', name: DB.brand.name, url: HW.absUrl('/'),
+          potentialAction: { '@type': 'SearchAction', target: HW.absUrl('/search') + '?q={search_term_string}', 'query-input': 'required name=search_term_string' } },
+        { '@context': 'https://schema.org', '@type': 'Organization', name: DB.brand.name, url: HW.absUrl('/'),
+          logo: DB.brand.logoImage ? absAsset(DB.brand.logoImage) : undefined,
+          email: u.isEmail((DB.contact || {}).email) ? DB.contact.email : undefined, address: postalAddress((DB.contact || {}).address),
+          sameAs: sameAs.length ? sameAs : undefined }
+      ];
+    }
+  };
+
+  /* Counts the cancellation window down, then re-renders the page so the button disappears. */
+  HW.countdown = function (id, paidAt) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    clearInterval(HW.countdown.timer);
+    HW.countdown.timer = setInterval(function () {
+      var left = HW.cancelLeft({ status: 'new', paid_at: paidAt || new Date().toISOString() });
+      if (!document.getElementById(id)) { clearInterval(HW.countdown.timer); return; }
+      if (left <= 0) { clearInterval(HW.countdown.timer); HW.router.run({ scroll: false }); return; }
+      document.getElementById(id).textContent = Math.ceil(left / 60000);
+    }, 10000);
+  };
+
+  /* ================================================================ *
+   * Wishlist
+   * ================================================================ */
+  var WKEY = 'hw:wishlist';
+  var wish = HW.wishlist = {
+    ids: function () { var a = u.store.get(WKEY, []); return Array.isArray(a) ? a : []; },
+    has: function (id) { return wish.ids().indexOf(id) >= 0; },
+    toggle: function (id, btn) {
+      var ids = wish.ids(), i = ids.indexOf(id);
+      var p = (HW.DB.products || []).find(function (x) { return x.id === id; });
+      if (i >= 0) ids.splice(i, 1); else ids.unshift(id);
+      u.store.set(WKEY, ids.slice(0, 100));
+      var on = i < 0;
+      u.qsa('[data-act="wish"][data-id="' + CSS.escape(id) + '"]').forEach(function (b) {
+        b.setAttribute('aria-pressed', String(on));
+        b.classList.toggle('on', on);
+        var label = (on ? 'Remove ' : 'Save ') + (p ? HW.seo.clip(p.name, 50) : 'item') + (on ? ' from' : ' to') + ' wishlist';
+        b.setAttribute('aria-label', label); b.title = on ? 'Saved' : 'Save to wishlist';
+        var t = b.querySelector('.wtext'); if (t) t.textContent = on ? 'Saved' : 'Save';
+      });
+      u.toast(on ? 'Saved to your wishlist' : 'Removed from your wishlist');
+      wish.renderCount();
+      var cur = HW.router.current || {};
+      if (!on && (cur.name === 'wishlist' || cur.name === 'account' && (cur.params || {}).section === 'wishlist')) HW.router.run({ scroll: false });
+    },
+    renderCount: function () {
+      var valid = wish.ids().filter(function (id) { return (HW.DB.products || []).some(function (p) { return p.id === id && !p.hidden; }); });
+      var el = document.getElementById('wishCount');
+      if (el) { el.textContent = valid.length; el.hidden = !valid.length; }
+      var link = document.getElementById('wishLink');
+      if (link) link.setAttribute('aria-label', 'Wishlist, ' + u.plural(valid.length, 'item'));
+    },
+    button: function (p, cls) {
+      var on = wish.has(p.id);
+      return '<button type="button" class="' + (cls || 'wish') + (on ? ' on' : '') + '" data-act="wish" data-id="' + esc(p.id) + '" aria-pressed="' + on + '" aria-label="' + (on ? 'Remove ' : 'Save ') + esc(HW.seo.clip(p.name, 50)) + (on ? ' from' : ' to') + ' wishlist" title="' + (on ? 'Saved' : 'Save to wishlist') + '">' +
+        '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 20.5s-7.5-4.6-9.3-9.2C1.6 8.4 3.4 5 6.8 5c2 0 3.4 1.1 4.2 2.4C11.8 6.1 13.2 5 15.2 5c3.4 0 5.2 3.4 4.1 6.3C19.5 15.9 12 20.5 12 20.5z" fill="currentColor" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>' +
+        (cls === 'wishbtn' ? '<span class="wtext">' + (on ? 'Saved' : 'Save') + '</span>' : '') + '</button>';
+    }
+  };
+
+  HW.views = HW.views || {};
+  HW.views.wishlist = function () {
+    var items = wish.ids().map(function (id) { return (HW.DB.products || []).find(function (p) { return p.id === id && !p.hidden; }); }).filter(Boolean);
+    return {
+      html: '<div class="wrap"><nav class="crumb" aria-label="Breadcrumb"><a href="' + HW.link('/') + '">Home</a> &nbsp;/&nbsp; <span aria-current="page">Wishlist</span></nav>' +
+        '<div class="listing-head"><div><div class="eyebrow" style="margin-bottom:8px">' + u.plural(items.length, 'item') + '</div><h1>Your wishlist</h1></div></div>' +
+        (items.length ? '<div class="p-grid wishgrid">' + items.map(function (p) { return HW.productCard(p, { heading: 'h2' }); }).join('') + '</div>'
+          : '<div class="confirm" style="padding:20px 0 80px"><p class="muted">Tap the heart on any product to save it here. Your wishlist is kept on this device.</p><a class="btn" href="' + HW.link('/') + '">Start shopping</a></div>') +
+        '<div style="height:70px"></div></div>',
+      seo: { title: 'Wishlist', noindex: true }
+    };
+  };
+
+  /* ================================================================ *
+   * Recently viewed
+   * ================================================================ */
+  var RKEY = 'hw:recent';
+  HW.recent = {
+    add: function (id) {
+      var ids = u.store.get(RKEY, []); if (!Array.isArray(ids)) ids = [];
+      ids = [id].concat(ids.filter(function (x) { return x !== id; })).slice(0, 12);
+      u.store.set(RKEY, ids);
+    },
+    section: function (currentId) {
+      var ids = u.store.get(RKEY, []); if (!Array.isArray(ids)) return '';
+      var list = ids.filter(function (id) { return id !== currentId; })
+        .map(function (id) { return (HW.DB.products || []).find(function (p) { return p.id === id; }); })
+        .filter(function (p) { return p && m.listable(p); }).slice(0, 4);
+      if (!list.length) return '';
+      return '<section class="section tight" aria-labelledby="recentHead"><div class="shead" style="margin-bottom:30px"><div class="eyebrow">Picking up where you left off</div>' +
+        '<h2 id="recentHead" style="font-size:30px;margin-top:10px">Recently viewed</h2></div>' +
+        '<div class="p-grid">' + list.map(function (p) { return HW.productCard(p); }).join('') + '</div></section>';
+    }
+  };
+
+  /* ================================================================ *
+   * Sale countdown
+   * One timer for the whole page: it fills every [data-sale-ends] element and, when the sale runs out,
+   * redraws the page so prices and badges go back to normal without anyone touching anything.
+   * ================================================================ */
+  HW.saleClock = (function () {
+    var timer = null;
+    function two(n) { return (n < 10 ? '0' : '') + n; }
+    function paint() {
+      var els = u.qsa('[data-sale-ends]');
+      if (!els.length) { stop(); return; }
+      var over = false;
+      els.forEach(function (el) {
+        var left = Number(el.getAttribute('data-sale-ends')) - Date.now();
+        if (!(left > 0)) { over = true; return; }
+        var d = Math.floor(left / 86400000), h = Math.floor(left / 3600000) % 24,
+            mi = Math.floor(left / 60000) % 60, sec = Math.floor(left / 1000) % 60;
+        if (el.getAttribute('data-sale-style') === 'bar') {
+          el.textContent = (d ? two(d) + 'd ' : '') + two(h) + 'h ' + two(mi) + 'm ' + two(sec) + 's';
+          return;
+        }
+        var slot = el.querySelector('[data-sale-clock]') || el;
+        if (slot.getAttribute('data-sale-clock') === 'parts') {
+          slot.innerHTML = (d ? '<i>' + two(d) + '<em>DAYS</em></i>' : '') +
+            '<i>' + two(h) + '<em>HRS</em></i><i>' + two(mi) + '<em>MIN</em></i><i>' + two(sec) + '<em>SEC</em></i>';
+        } else {
+          el.textContent = 'Ends in ' + (d ? d + 'd ' : '') + two(h) + 'h ' + two(mi) + 'm' + (d ? '' : ' ' + two(sec) + 's');
+        }
+      });
+      if (over) {
+        stop();
+        try { HW.paintChrome(); } catch (e) { /* the bar is redrawn on the next page anyway */ }
+        if (HW.router) HW.router.run({ scroll: false });
+      }
+    }
+    function stop() { if (timer) { clearInterval(timer); timer = null; } }
+    return {
+      start: function () {
+        stop();
+        if (!u.qsa('[data-sale-ends]').length) return;
+        paint();
+        timer = setInterval(paint, 1000);
+      }
+    };
+  })();
+
+  /* ================================================================ *
+   * Search
+   * ================================================================ */
+  // 24"x40", 24 x 40, 24×40 and 24 in x 40 in all become 24x40 before anything else.
+  // The unit takes its spacing with it, so "17x24 18x18" stays two words instead of running together.
+  function sizes(s) { return String(s || '').replace(/(\d+(?:\.\d+)?)(?:\s*(?:["”″]|in(?:ch(?:es)?)?\b))?\s*[x×]\s*(\d+(?:\.\d+)?)(?:\s*(?:["”″]|in(?:ch(?:es)?)?\b))?/gi, '$1x$2'); }
+  function norm(s) { return sizes(String(s || '').toLowerCase().replace(/["”″′]/g, '"')).replace(/"/g, ' in ').normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ').trim(); }
+
+  function searchIndex() {
+    if (HW._searchIndex && HW._searchIndex.db === HW.DB) return HW._searchIndex.items;
+    var items = (HW.DB.products || []).filter(m.listable).map(function (p) {
+      var cat = m.categoryById(p.categoryId);
+      var sub = cat && (cat.subcategories || []).find(function (s) { return s.id === p.subcategoryId; });
+      var colors = m.isCollection(p) ? m.optColor(p).values.map(function (c) { return c.label; }).join(' ') : '';
+      var sizes = m.isCollection(p) ? m.optSize(p).values.map(function (s) { return s.label + ' ' + (s.note || ''); }).join(' ') : '';
+      var skus = [];
+      if (m.isCollection(p)) m.eachVariant(p, function (v) { skus.push(v.sku); }); else if (p.sku) skus.push(p.sku);
+      return { p: p, name: norm(p.name), meta: norm([cat && cat.name, sub && sub.name, p.material, colors, sizes, p.badge].join(' ')), sku: skus.join(' ').toLowerCase(), body: norm(HW.htmlToText(p.description)) };
+    });
+    HW._searchIndex = { db: HW.DB, items: items };
+    return items;
+  }
+
+  HW.search = {
+    run: function (q) {
+      var terms = norm(String(q || '').slice(0, 100)).split(' ').filter(function (t) { return t.length > 0; });
+      // A single letter matches almost everything: ask for a bit more.
+      if (!terms.length || (terms.length === 1 && terms[0].length < 2)) return [];
+      var raw = String(q).trim().toLowerCase();
+      return searchIndex().map(function (it) {
+        var score = 0;
+        for (var i = 0; i < terms.length; i++) {
+          var t = terms[i], hit = 0;
+          if (new RegExp('\\b' + t).test(it.name)) hit = 10;
+          else if (it.name.indexOf(t) >= 0) hit = 6;
+          else if (new RegExp('\\b' + t).test(it.meta)) hit = 5;
+          else if (it.sku.indexOf(t) >= 0) hit = 8;
+          else if (t.length > 2 && it.body.indexOf(t) >= 0) hit = 1;
+          if (!hit) return null; // every word must match somewhere
+          score += hit;
+        }
+        if (raw.length > 3 && it.sku.split(' ').indexOf(raw) >= 0) score += 50;
+        if (m.productOut(it.p)) score -= 3;
+        return { p: it.p, score: score };
+      }).filter(Boolean).sort(function (a, b) { return b.score - a.score; }).map(function (r) { return r.p; });
+    },
+    /* Which size the words were really after — "tank lid cover" is a size on a rug listing, not a
+       product of its own, so the result can point straight at it. */
+    sizeFor: function (p, q) {
+      if (!m.isCollection(p)) return null;
+      var terms = norm(String(q || '').slice(0, 100)).split(' ').filter(Boolean);
+      if (!terms.length) return null;
+      var best = null;
+      m.optSize(p).values.forEach(function (s) {
+        var hay = norm(s.label + ' ' + (s.note || ''));
+        var all = terms.every(function (t) { return hay.indexOf(t) >= 0; });
+        if (all && (!best || (s.note || '').length > (best.note || '').length)) best = s;
+      });
+      return best;
+    }
+  };
+
+  var releaseSearch = null;
+  HW.searchPanel = {
+    open: function () {
+      var panel = document.getElementById('searchPanel');
+      if (!panel.hidden) return;
+      HW.menu.close(false); HW.cart.close(false);
+      panel.hidden = false;
+      document.getElementById('searchBtn').setAttribute('aria-expanded', 'true');
+      var input = document.getElementById('searchInput');
+      releaseSearch = u.trapFocus(panel, HW.searchPanel.close);
+      setTimeout(function () { input.focus(); input.select(); }, 40);
+      HW.searchPanel.update();
+    },
+    close: function (restore) {
+      var panel = document.getElementById('searchPanel');
+      if (panel.hidden) return;
+      panel.hidden = true;
+      var btn = document.getElementById('searchBtn');
+      btn.setAttribute('aria-expanded', 'false');
+      if (releaseSearch) { releaseSearch(restore); releaseSearch = null; }
+      var a = document.activeElement;
+      if (restore !== false && (!a || a === document.body || panel.contains(a))) btn.focus();
+    },
+    update: u.debounce(function () {
+      var input = document.getElementById('searchInput'), box = document.getElementById('searchResults'), status = document.getElementById('searchStatus');
+      var q = input.value.trim();
+      if (!q) { box.innerHTML = ''; status.textContent = ''; return; }
+      var res = HW.search.run(q);
+      status.textContent = res.length ? u.plural(res.length, 'result') + ' for “' + q + '”' : 'No products match “' + q + '”';
+      box.innerHTML = res.slice(0, 6).map(function (p) {
+        var r = m.priceRange(p), out = m.productOut(p);
+        var sz = HW.search.sizeFor(p, q);
+        var base = HW.link('/product/' + p.slug);
+        var href = base + (sz ? (base.indexOf('?') >= 0 ? '&' : '?') + 'size=' + encodeURIComponent(sz.label) : '');
+        return '<li><a class="sres" href="' + href + '">' +
+          '<img src="' + esc(HW.asset(m.thumb((sz && m.sizeImage(p, sz)) || m.imageOrSwatch(p)))) + '" alt="" width="56" height="56" loading="lazy">' +
+          '<span class="snm">' + esc(HW.seo.clip(p.name, 80)) +
+          (sz && sz.note ? '<span class="ssz">' + esc(sz.note) + ' · ' + esc(sz.label) + '</span>' : '') +
+          '<span class="spr">' + (r.min === r.max ? u.money(r.min) : 'from ' + u.money(r.min)) + (out ? ' · Out of stock' : '') + '</span></span></a></li>';
+      }).join('') + (res.length > 6 ? '<li><a class="sall link-u" href="' + HW.link('/search?q=' + encodeURIComponent(q)) + '">See all ' + res.length + ' results</a></li>' : '');
+    }, 120)
+  };
+
+  HW.views.search = function (params) {
+    var q = String(params.q || '').trim().slice(0, 100);
+    var res = q ? HW.search.run(q) : [];
+    return {
+      html: '<div class="wrap"><nav class="crumb" aria-label="Breadcrumb"><a href="' + HW.link('/') + '">Home</a> &nbsp;/&nbsp; <span aria-current="page">Search</span></nav>' +
+        '<div class="listing-head"><div>' + (q ? '<div class="eyebrow" style="margin-bottom:8px" aria-live="polite">' + u.plural(res.length, 'result') + '</div>' : '') +
+        '<h1>' + (q ? 'Results for “' + esc(HW.seo.clip(q, 60)) + '”' : 'Search') + '</h1></div>' +
+        '<form class="searchpage" role="search" data-form="search"><label class="sr-only" for="searchPageInput">Search products</label>' +
+        '<input id="searchPageInput" name="q" type="search" maxlength="100" value="' + esc(q) + '" placeholder="Search products" autocomplete="off"><button class="btn sm" type="submit">Search</button></form></div>' +
+        (res.length ? '<div class="p-grid">' + res.map(function (p) { return HW.productCard(p, { heading: 'h2' }); }).join('') + '</div>'
+          : '<div class="confirm" style="padding:10px 0 80px"><p class="muted">' + (q ? (q.replace(/\s/g, '').length < 2 ? 'Type at least two letters.' : 'Nothing matched. Try a simpler word like “rug”, “towel”, a color or a size like 24x40.') : 'Type what you’re looking for.') + '</p>' +
+            '<div class="subnav" style="justify-content:center">' + m.visibleCategories().map(function (c) { return '<a class="chip" href="' + HW.link('/category/' + c.slug) + '">' + esc(c.name) + '</a>'; }).join('') + '</div></div>') +
+        '<div style="height:70px"></div></div>',
+      seo: { title: q ? 'Search: ' + q : 'Search', noindex: true }
+    };
+  };
+
+  /* ================================================================ *
+   * Image zoom (lightbox)
+   * ================================================================ */
+  var lb = { items: [], idx: 0, release: null };
+  HW.lightbox = {
+    open: function (items, idx, alt) {
+      lb.items = items.filter(function (it) { return it.type === 'img'; });
+      if (!lb.items.length) return;
+      lb.idx = Math.max(0, Math.min(idx, lb.items.length - 1)); lb.alt = alt || '';
+      var box = document.getElementById('lightbox');
+      box.hidden = false;
+      document.body.classList.add('noscroll');
+      HW.lightbox.show();
+      lb.release = u.trapFocus(box.querySelector('.lb-inner'), HW.lightbox.close);
+    },
+    show: function () {
+      var box = document.getElementById('lightbox');
+      var it = lb.items[lb.idx];
+      var stage = box.querySelector('.lb-stage');
+      stage.classList.remove('zoomed');
+      stage.innerHTML = '<img src="' + esc(HW.asset(it.src)) + '" alt="' + esc(lb.alt + (lb.items.length > 1 ? ' — photo ' + (lb.idx + 1) + ' of ' + lb.items.length : '')) + '">';
+      box.querySelector('.lb-count').textContent = lb.items.length > 1 ? (lb.idx + 1) + ' / ' + lb.items.length : '';
+      u.qsa('.lb-nav', box).forEach(function (b) { b.hidden = lb.items.length < 2; });
+      var zb = box.querySelector('.lb-zoom'); zb.setAttribute('aria-pressed', 'false'); zb.textContent = 'Zoom in';
+    },
+    step: function (d) { lb.idx = (lb.idx + d + lb.items.length) % lb.items.length; HW.lightbox.show(); },
+    toggleZoom: function (e) {
+      var stage = document.querySelector('#lightbox .lb-stage');
+      var img = stage.querySelector('img');
+      var on = stage.classList.toggle('zoomed');
+      var zb = document.querySelector('#lightbox .lb-zoom');
+      zb.setAttribute('aria-pressed', String(on)); zb.textContent = on ? 'Zoom out' : 'Zoom in';
+      if (on && e && e.clientX != null) HW.lightbox.pan(e);
+      else img.style.transformOrigin = '50% 50%';
+    },
+    pan: function (e) {
+      var stage = document.querySelector('#lightbox .lb-stage');
+      if (!stage.classList.contains('zoomed')) return;
+      var img = stage.querySelector('img'), r = img.getBoundingClientRect();
+      var x = Math.max(0, Math.min(100, (e.clientX - r.left) / r.width * 100)), y = Math.max(0, Math.min(100, (e.clientY - r.top) / r.height * 100));
+      img.style.transformOrigin = x + '% ' + y + '%';
+    },
+    close: function () {
+      var box = document.getElementById('lightbox');
+      if (box.hidden) return;
+      box.hidden = true;
+      document.body.classList.remove('noscroll');
+      if (lb.release) { lb.release(); lb.release = null; }
+    }
+  };
+
+  /* ================================================================ *
+   * Size guide
+   * ================================================================ */
+  HW.sizeGuide = {
+    available: function () { return !!String((HW.DB.settings || {}).sizeGuide || '').trim(); },
+    open: function (trigger) {
+      var box = document.getElementById('sizeGuide');
+      box.querySelector('.sg-body').innerHTML = HW.richText(m.pageText(HW.DB.settings.sizeGuide), true);
+      box.hidden = false;
+      document.body.classList.add('noscroll');
+      var release = u.trapFocus(box.querySelector('.sg-inner'), close);
+      function close() { box.hidden = true; document.body.classList.remove('noscroll'); release(); if (trigger && trigger.focus) trigger.focus(); box.onclick = null; }
+      box.onclick = function (e) { if (e.target === box || e.target.closest('[data-sg-close]')) close(); };
+    }
+  };
+
+  /* ================================================================ *
+   * Cookie consent (necessary only / accept all)
+   * ================================================================ */
+  var CKEY = 'hw:consent';
+  HW.consent = {
+    get: function () { return u.store.get(CKEY, null); },
+    allowed: function (kind) { var c = HW.consent.get(); return kind === 'necessary' || !!(c && c.level === 'all'); },
+    set: function (level) {
+      u.store.set(CKEY, { level: level, at: new Date().toISOString(), v: 1 });
+      HW.consent.hide();
+      if (level === 'all') u.toast('Thanks — all cookies accepted');
+      document.dispatchEvent(new CustomEvent('hw:consent', { detail: level }));
+    },
+    show: function () {
+      var b = document.getElementById('cookieBanner');
+      if (!b) return;
+      b.querySelector('.cb-policy').setAttribute('href', HW.link('/page/privacy-policy'));
+      b.hidden = false;
+    },
+    hide: function () { var b = document.getElementById('cookieBanner'); if (b) b.hidden = true; },
+    init: function () { if (!HW.consent.get()) HW.consent.show(); }
+  };
+})(window.HW = window.HW || {});
